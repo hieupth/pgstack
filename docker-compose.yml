@@ -1,0 +1,42 @@
+secrets:
+  postgres_password:
+    file: ./password
+
+services:
+  pgsql:
+    image: postgres:17
+    container_name: postgresql
+    user: "999:999"
+    restart: always
+    command: ["postgres", "-c", "config_file=/postgresql.conf"]
+    secrets:
+      - postgres_password
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - ./data:/var/lib/postgresql/data:Z
+      - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETUID
+      - SETGID
+      - DAC_OVERRIDE
+    tmpfs:
+      - /tmp:noexec,nosiud,size=100m
+      - /var/run/postgresql:noexec,nosuid,size=100m
+      - /tmp/pg_stats:noexec,nosuid,size=100m
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
