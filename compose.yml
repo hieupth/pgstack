@@ -1,0 +1,60 @@
+secrets:
+  postgres_password:
+    file: ./password
+  pgbouncer_userlist:
+    file: ./userlist.txt
+
+services:
+  postgresql:
+    image: postgres:17
+    container_name: postgresql
+    restart: always
+    secrets:
+      - postgres_password
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    volumes:
+      - ./data:/var/lib/postgresql/data:Z
+      - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  pgbouncer:
+    image: edoburu/pgbouncer
+    container_name: pgbouncer
+    restart: always
+    ports:
+      - 6432:5432
+    links:
+      - postgresql:postgresql
+    depends_on:
+      postgresql:
+        condition: service_healthy
+    secrets:
+      - pgbouncer_userlist
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ~/ssl:/ssl:ro
+    healthcheck:
+      test: ["CMD-SHELL", "nc -z postgresql 5432 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 3
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
