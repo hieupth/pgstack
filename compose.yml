@@ -8,7 +8,9 @@ services:
   postgresql:
     image: postgres:17
     container_name: postgresql
-    restart: always
+    restart: unless-stopped
+    networks:
+      - pgstacknet
     secrets:
       - postgres_password
     environment:
@@ -31,9 +33,11 @@ services:
         max-file: "3"
 
   pgbouncer:
-    image: edoburu/pgbouncer
+    image: edoburu/pgbouncer:v1.25.2-p0
     container_name: pgbouncer
-    restart: always
+    restart: unless-stopped
+    networks:
+      - pgstacknet
     ports:
       - 6432:5432
     links:
@@ -47,7 +51,7 @@ services:
       - no-new-privileges:true
     volumes:
       - ./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
-      - ~/ssl:/ssl:ro
+      - ./ssl:/ssl:ro
     healthcheck:
       test: ["CMD-SHELL", "nc -z postgresql 5432 || exit 1"]
       interval: 10s
@@ -58,3 +62,7 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+
+networks:
+  pgstacknet:
+    external: true
