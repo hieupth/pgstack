@@ -16,9 +16,18 @@ services:
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+    # Without config_file=, the mounted postgresql.conf/pg_hba.conf are IGNORED
+    # (the postgres image only reads them when told to).
+    command:
+      - postgres
+      - -c
+      - config_file=/etc/postgresql/postgresql.conf
+      - -c
+      - hba_file=/etc/postgresql/pg_hba.conf
     volumes:
       - ./data:/var/lib/postgresql/data:Z
       - ./postgresql.conf:/etc/postgresql/postgresql.conf:ro
+      - ./pg_hba.conf:/etc/postgresql/pg_hba.conf:ro
     security_opt:
       - no-new-privileges:true
     healthcheck:
@@ -39,7 +48,10 @@ services:
     networks:
       - pgstacknet
     ports:
-      - 6432:5432
+      # Loopback only by default — nothing exposed off-host. Remote apps come in
+      # via `tailscale serve --bg --tcp=6432 tcp://127.0.0.1:6432` (tailnet-only,
+      # never `funnel`), or an SSH tunnel for one-off admin.
+      - "127.0.0.1:6432:5432"
     links:
       - postgresql:postgresql
     depends_on:

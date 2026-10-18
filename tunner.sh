@@ -192,6 +192,8 @@ render() {
     grep -nE '@[A-Z_]+@' "$out" >&2
     exit 1
   fi
+  # Be umask-independent: postgres (container uid 999) must be able to read it.
+  chmod 644 "$out"
 }
 
 echo ">> Rendering postgresql.conf ..."
