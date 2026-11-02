@@ -20,6 +20,10 @@ cd "$SCRIPT_DIR"
 
 HOSTNAME_IN="${1:-}"
 [ -n "$HOSTNAME_IN" ] || { echo "Usage: $0 <public-hostname> [tunner.sh options]" >&2; exit 2; }
+# A leading dash means options were given before the hostname (e.g.
+# `./setup.sh --ram 8192 host`) — HOSTNAME_IN would become "--ram" and
+# sslgen would silently mint a cert with CN=--ram before tunner rejects.
+case "$HOSTNAME_IN" in -*) echo "ERROR: hostname comes FIRST, before tunner options" >&2; exit 2;; esac
 shift
 
 # Root is refused on purpose: pgbouncer runs as YOUR uid (compose user: from
@@ -56,7 +60,11 @@ detect_wg_bind() {
     printf '127.0.0.2'
   fi
 }
-EXISTING_BIND="$(sed -n 's/^WG_BIND=//p' .env 2>/dev/null)"
+# `|| true` is load-bearing: on a fresh host .env does not exist and sed
+# exits 2 — without it, set -e killed setup silently at this line.
+# tr strips CR/trailing whitespace (a Windows-edited .env would otherwise
+# round-trip a poisoned WG_BIND forever).
+EXISTING_BIND="$(sed -n 's/^WG_BIND=//p' .env 2>/dev/null | tr -d '[:space:]' || true)"
 if [ -n "$EXISTING_BIND" ] && [ "$EXISTING_BIND" != "127.0.0.2" ]; then
   WG_BIND="$EXISTING_BIND"
   echo ">> keeping existing WG_BIND=$WG_BIND from .env"
@@ -121,10 +129,19 @@ chmod 600 userlist.txt   # pgbouncer runs as your uid (compose user:) — 600 is
 # ---- 2b. CA-key migration (old layout kept it inside the mounted ./ssl) -----
 # Runs on EVERY setup so a repo upgrade can never skip it: leaving the CA
 # signing key inside ./ssl hands it to the pgbouncer container (dir is mounted).
+# NEVER overwrite an existing ssl-ca/ca-key.pem (e.g. an old ssl/ restored
+# over a migrated tree) — quarantine the stray instead, nothing is lost.
 if [ -f ssl/ca-key.pem ]; then
   mkdir -p ssl-ca && chmod 700 ssl-ca
-  mv ssl/ca-key.pem ssl-ca/ca-key.pem && chmod 600 ssl-ca/ca-key.pem
-  echo ">> migrated ssl/ca-key.pem -> ssl-ca/ca-key.pem (outside the container mount)"
+  if [ -f ssl-ca/ca-key.pem ]; then
+    mv ssl/ca-key.pem "ssl-ca/ca-key.pem.stray-$(date -u +%Y%m%d%H%M%S)"
+    echo ">> WARN: ssl/ca-key.pem AND ssl-ca/ca-key.pem both existed — stray quarantined" >&2
+    echo ">>       in ssl-ca/*.stray-*; compare with ca.pem and delete the wrong one." >&2
+  else
+    mv ssl/ca-key.pem ssl-ca/ca-key.pem
+    echo ">> migrated ssl/ca-key.pem -> ssl-ca/ca-key.pem (outside the container mount)"
+  fi
+  chmod 600 ssl-ca/ca-key.pem*
 fi
 
 # ---- 3. TLS certs ------------------------------------------------------------
@@ -172,4 +189,12 @@ Done.
   Remote apps   : WireGuard only. Bring up wg0, set WG_BIND=<wg-ip> in .env,
                   then: docker compose up -d
                   DSN: postgresql://<role>:<pw>@<wg-ip>:6432/<db>?sslmode=verify-full&sslrootcert=<ca.pem>
+
+NOT DONE YET — backups do not exist until you do this (see README Backups):
+  1. crontab -e   (as THIS user, not root) and add:
+     15 3 * * *  cd <this-dir> && mkdir -p backups && ./backup.sh >> backups/backup.log 2>&1
+  2. Copy off-host ENCRYPTED (globals dumps contain SCRAM verifiers), and
+     bundle creds/ + userlist.txt + ssl-ca/ + .env with them — a host-loss DR
+     needs all of those, not just the dumps.
+  3. Calendar the cert expiry: openssl x509 -in ssl/cert.pem -noout -enddate
 EOF

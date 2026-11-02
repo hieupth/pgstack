@@ -20,8 +20,9 @@ PG_OUT="$SCRIPT_DIR/postgresql.conf"
 BOUNCER_TEMPLATE="$SCRIPT_DIR/pgbouncer.ini.template"
 BOUNCER_OUT="$SCRIPT_DIR/pgbouncer.ini"
 # Boot-verify EXACTLY what compose runs: read the digest-pinned image from
-# compose.yml; fall back to the floating tag only when unpinned.
-PG_IMAGE="$(sed -n 's/.*image: \(postgres:17@sha256:[0-9a-f]\{64\}\).*/\1/p' "$SCRIPT_DIR/compose.yml" | head -1)"
+# compose.yml; fall back to the floating tag only when unpinned. (`|| true`:
+# same set -e trap as the .env read — a failed capture must fall back, not kill.)
+PG_IMAGE="$(sed -n 's/.*image: \(postgres:17@sha256:[0-9a-f]\{64\}\).*/\1/p' "$SCRIPT_DIR/compose.yml" 2>/dev/null | head -1 || true)"
 PG_IMAGE="${PG_IMAGE:-postgres:17}"
 PG_MAX_CONNECTIONS=150   # PostgreSQL backend cap; also drives pgbouncer max_db_connections
 
@@ -46,10 +47,10 @@ EOF
 OPT_RAM=""; OPT_CPU=""; OPT_DISK=""; OPT_VERIFY=1; OPT_APPS=1
 while [ $# -gt 0 ]; do
   case "$1" in
-    --ram)        OPT_RAM="$2";  shift 2;;
-    --cpu)        OPT_CPU="$2";  shift 2;;
-    --disk)       OPT_DISK="$2"; shift 2;;
-    --apps)       OPT_APPS="$2"; shift 2;;
+    --ram)        [ $# -ge 2 ] || { echo "ERROR: --ram needs a value" >&2; exit 2; };   OPT_RAM="$2";  shift 2;;
+    --cpu)        [ $# -ge 2 ] || { echo "ERROR: --cpu needs a value" >&2; exit 2; };   OPT_CPU="$2";  shift 2;;
+    --disk)       [ $# -ge 2 ] || { echo "ERROR: --disk needs a value" >&2; exit 2; };  OPT_DISK="$2"; shift 2;;
+    --apps)       [ $# -ge 2 ] || { echo "ERROR: --apps needs a value" >&2; exit 2; };  OPT_APPS="$2"; shift 2;;
     --no-verify)  OPT_VERIFY=0;  shift;;
     -h|--help)    usage; exit 0;;
     *) echo "unknown arg: $1" >&2; usage >&2; exit 2;;

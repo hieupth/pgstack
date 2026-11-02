@@ -37,8 +37,12 @@ done
 
 # Serialize concurrent runs: two cred.sh racing on userlist.txt (shared tmp
 # file, read-modify-write) can silently drop a line. Cheap lock, no luck.
+# 0600 + a 60s timeout: a 0644 lock could be held FOREVER by any local user
+# (flock needs only an open fd) — blocking every rotation, including the
+# incident-response kind. Now it hard-fails instead of hanging.
 exec 9>"$SCRIPT_DIR/.cred.lock"
-flock 9
+chmod 600 "$SCRIPT_DIR/.cred.lock"
+flock -w 60 9 || { echo "ERROR: .cred.lock held >60s — another cred.sh running, or a stale holder (lsof .cred.lock)" >&2; exit 1; }
 
 # ON_ERROR_STOP: fail at the first failing statement instead of silently
 # continuing (e.g. CREATE ok but ALTER fails) into a half-applied state.

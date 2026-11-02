@@ -39,6 +39,15 @@ if [ -z "$HOSTNAME_IN" ]; then
   echo "error: hostname is required" >&2; usage; exit 2
 fi
 
+# IPv6 literals are rejected loudly: the SAN would silently become DNS:<v6>
+# (openssl accepts it) and never satisfy verify-full — and the compose ports
+# mapping can't express the bracketed form this stack would need anyway.
+for a in "$HOSTNAME_IN" "${EXTRA_SANS[@]}"; do
+  case "$a" in
+    *:*) echo "error: IPv6 literals are not supported (use an IPv4 or DNS name): '$a'" >&2; exit 2;;
+  esac
+done
+
 # SAN type: IPv4 address vs DNS name
 san_of() {
   if [[ "$1" =~ ^[0-9]+(\.[0-9]+){3}$ ]]; then printf 'IP:%s' "$1"
@@ -66,10 +75,27 @@ mkdir -p "$SSL_DIR" "$CA_KEY_DIR"
 chmod 700 "$SSL_DIR" "$CA_KEY_DIR"
 cd "$SSL_DIR"
 
-# One-time migration from the old layout (CA key inside the mounted ./ssl)
+# One-time migration from the old layout (CA key inside the mounted ./ssl).
+# Both existing = ambiguous (an old ssl/ restored over a migrated tree):
+# refuse — never silently clobber the live key, never leave one in the mount.
+if [ -f ca-key.pem ] && [ -f "$CA_KEY_DIR/ca-key.pem" ]; then
+  echo "error: both ssl/ca-key.pem and ssl-ca/ca-key.pem exist — resolve manually:" >&2
+  echo "  keep the one matching ssl/ca.pem: openssl x509 -in ca.pem -noout -pubkey" >&2
+  echo "  vs: openssl pkey -in <keyfile> -pubout  (then delete the other)" >&2
+  exit 1
+fi
 if [ -f ca-key.pem ] && [ ! -f "$CA_KEY_DIR/ca-key.pem" ]; then
   mv ca-key.pem "$CA_KEY_DIR/ca-key.pem"
   echo ">> moved existing ca-key.pem -> $CA_KEY_DIR/ca-key.pem (outside the container mount)"
+fi
+
+# ca.pem WITHOUT its key is an error, not a rotation trigger: --force must
+# never silently mint a brand-new CA that every deployed client stops trusting.
+if [ -f ca.pem ] && [ ! -f "$CA_KEY_DIR/ca-key.pem" ]; then
+  echo "error: ssl/ca.pem exists but ssl-ca/ca-key.pem is missing." >&2
+  echo "       Restore the key from your off-host bundle, or delete ssl/ca.pem" >&2
+  echo "       to DELIBERATELY rotate the CA (every app must then trust the new ca.pem)." >&2
+  exit 1
 fi
 
 if [ ! -f ca.pem ] || [ ! -f "$CA_KEY_DIR/ca-key.pem" ]; then

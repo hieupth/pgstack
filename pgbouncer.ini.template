@@ -46,6 +46,10 @@ server_check_query = SELECT 1
 server_lifetime = 3600
 server_idle_timeout = 600
 client_login_timeout = 60
+# Evict idle CLIENT connections: with one leaked app password an attacker
+# could otherwise hold ~max_client_conn idle conns and starve EVERY tenant
+# (max_user_connections only caps server conns — it does not help here).
+client_idle_timeout = 600
 # (server_reset_query is intentionally omitted: it is a no-op in transaction pooling)
 
 # Admin settings - dedicated console user, created/rotated by ./cred.sh pgbouncer_admin

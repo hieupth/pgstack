@@ -141,7 +141,12 @@ If `cl_waiting` grows, raise the pool; if `sv_active` stays well above 2-3x core
 - **Admin console** requires the dedicated `pgbouncer_admin` user (random password from `./cred.sh pgbouncer_admin`), never the postgres superuser. Connection logging (`log_connections`) is on at both layers.
 - `pg_hba.conf` is mounted and wired via `hba_file`: SCRAM on every TCP path; trust only on the container-local unix socket (`docker exec` = host root).
 - TLS is enforced app→PgBouncer (`client_tls_sslmode = require`). The server cert's SANs cover every access path (WireGuard IP, `127.0.0.1`, `localhost`) — always use `sslmode=verify-full` + `ca.pem`. Re-issuing the cert (`sslgen.sh ... --force`) needs `docker compose restart pgbouncer` to take effect. PgBouncer→PostgreSQL TLS is optional (see `pgbouncer.ini.template`).
-- **Images are digest-pinned** (`image: tag@sha256:...`) — a moved tag can never silently change what runs. Update deliberately: `docker compose pull`, check `docker images --digests`, then update the digest in `compose.yml`.
+- **Images are digest-pinned** (`image: tag@sha256:...`) — a moved tag can never silently change what runs. Note both `docker compose pull` and `docker images --digests` re-show the *pinned* digest and cannot tell you a newer one exists; check freshness against the Hub and bump deliberately:
+  `curl -s https://hub.docker.com/v2/repositories/library/postgres/tags/17 | jq -r .digest` (same for `edoburu/pgbouncer/tags/v1.26.1-p0`), compare with `compose.yml`, then update the digest and `docker compose up -d`.
+- **The superuser can never log in over TCP** — `pg_hba.conf` rejects user `postgres` on every host line (break-glass is `docker exec` only). The host itself can route to container IPs on the docker bridge, so this is what makes a readable `./password` worthless to any local process.
+- Idle pgbouncer clients are evicted after 10 min (`client_idle_timeout = 600`) — one leaked app password cannot starve every tenant by holding `max_client_conn` idle.
+- Cert expiry has **no automation by design** — calendar it: `openssl x509 -in ssl/cert.pem -noout -enddate` (server cert ~2.3y, CA ~10y; renew: `./sslgen.sh <host> <wg-ip> 127.0.0.1 localhost --force` + `docker compose restart pgbouncer`).
+- `/var/lib/docker` grows with every deliberate image bump (digest pins accumulate) — `docker image prune` after each update.
 - **Secret file permissions**: pgbouncer runs as your uid (`.env` → compose `user:`), so `userlist.txt` and the TLS key are `0600`; the CA signing key lives in `./ssl-ca/` (never mounted into any container); `./password` is locked to `0600` uid 999 when root/sudo is available. Compose file-secrets are plain bind mounts — docker does not enforce modes, the scripts do.
 - Slow-query logging never writes bind-parameter values (`log_parameter_max_length = 0`); query text with `$n` placeholders is still logged.
 - `pg_stat_statements` is preloaded — run `CREATE EXTENSION pg_stat_statements;` in each database to query it.
@@ -151,12 +156,27 @@ If `cl_waiting` grows, raise the pool; if `sv_active` stays well above 2-3x core
 
 ```bash
 ./backup.sh    # globals + every database -> ./backups/ (custom format, gzipped globals)
-# cron: 15 3 * * *  cd /path/to/pgstack && ./backup.sh >> backups/backup.log 2>&1
+# cron — the OPERATOR's crontab (`crontab -e` as that user), never root's
+# (root-owned dumps break the operator-run DR restore; /etc/cron.d also
+# requires a user field, a bare paste there is silently ignored):
+15 3 * * *  cd /path/to/pgstack && mkdir -p backups && ./backup.sh >> backups/backup.log 2>&1
 ```
 
 Keeps `BACKUP_KEEP_DAYS` (default 14) days of dumps locally — copy them off-host
-(rclone/rsync); a backup that lives only on this VPS is not a backup. Restore a
-database **directly through the postgres container** (not through PgBouncer):
+(rclone/rsync); a backup that lives only on this VPS is not a backup. Two rules
+for the off-host copy:
+
+- **Encrypt it** (`age`/`gpg`, or an `rclone crypt` remote): the globals dump
+  contains every role's **SCRAM verifier** — the same bytes pgbouncer
+  authenticates against. 192-bit random passwords make offline attack
+  infeasible *today*, but the dump must not sit plaintext on third-party
+  storage the day any role gets a hand-chosen password.
+- **Bundle the host-only secrets with it**: `creds/`, `userlist.txt`,
+  `ssl-ca/`, `.env`. They live on this VPS and nowhere else — lose the host
+  and you lose the restore path itself (every app credential, the CA key,
+  the TLS identity), even with perfect dumps in hand.
+
+Restore a database **directly through the postgres container** (not through PgBouncer):
 
 ```bash
 docker compose exec -T postgresql pg_restore -U postgres -C -d postgres backups/<db>-<stamp>.dump
@@ -178,7 +198,8 @@ zcat backups/globals-<stamp>.sql.gz | docker compose exec -T postgresql psql -U 
 # applies. Do NOT add ON_ERROR_STOP (it aborts the whole globals restore).
 # Any OTHER error: stop and inspect. Globals MUST run before the dumps — the
 # dump's ALTER ... OWNER statements need their roles to exist.
-for f in backups/*-<stamp>.dump; do                          # skip the postgres db dump if undesired
+for f in backups/*-<stamp>.dump; do
+  case "${f##*/}" in postgres-*) continue;; esac              # postgres db exists already; -C would error on it
   docker compose exec -T postgresql pg_restore -U postgres -C -d postgres < "$f"
 done
 docker compose restart pgbouncer                             # clear cached auth state
@@ -187,8 +208,9 @@ docker compose restart pgbouncer                             # clear cached auth
 
 Tested: roles come back with identical SCRAM verifiers, so apps reconnect with
 their existing credentials (userlist/creds live on the host, not in data/).
-Note the last step also rotates the admin password (expected `setup.sh`
-behavior) — read it from `creds/pgbouncer_admin.pw`. The REVOKE CONNECT
+Note the last step provisions `pgbouncer_admin` only if missing — it does
+**not** rotate the console password on re-run (rotate deliberately with
+`./cred.sh pgbouncer_admin`). The REVOKE CONNECT
 hardening on `postgres`/`template1` is NOT part of the globals dump, which is
 why the final `setup.sh` re-run is required.
 
