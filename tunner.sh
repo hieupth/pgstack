@@ -19,7 +19,10 @@ PG_TEMPLATE="$SCRIPT_DIR/postgresql.conf.template"
 PG_OUT="$SCRIPT_DIR/postgresql.conf"
 BOUNCER_TEMPLATE="$SCRIPT_DIR/pgbouncer.ini.template"
 BOUNCER_OUT="$SCRIPT_DIR/pgbouncer.ini"
-PG_IMAGE="postgres:17"
+# Boot-verify EXACTLY what compose runs: read the digest-pinned image from
+# compose.yml; fall back to the floating tag only when unpinned.
+PG_IMAGE="$(sed -n 's/.*image: \(postgres:17@sha256:[0-9a-f]\{64\}\).*/\1/p' "$SCRIPT_DIR/compose.yml" | head -1)"
+PG_IMAGE="${PG_IMAGE:-postgres:17}"
 PG_MAX_CONNECTIONS=150   # PostgreSQL backend cap; also drives pgbouncer max_db_connections
 
 usage() {
@@ -169,6 +172,10 @@ compute() {
     RANDOM_PAGE_COST="1.1"; EFFECTIVE_IO_CONCURRENCY=200
   fi
 }
+# The "assumed" label contains '|' (--disk ssd|hdd) which would break sed's
+# '|' delimiter below — sanitize for the template, keep the full text for the
+# console warning above.
+DISK_TYPE_LABEL="$(printf '%s' "$DISK_TYPE" | tr '|' '/')"
 compute
 
 printf '   -> shared_buffers=%sMB  effective_cache_size=%sMB  work_mem=%sMB  maintenance_work_mem=%sMB\n' \
@@ -201,7 +208,7 @@ render() {
     -e "s|@DEFAULT_POOL_SIZE@|$DEFAULT_POOL_SIZE|g" \
     -e "s|@RANDOM_PAGE_COST@|$RANDOM_PAGE_COST|g" \
     -e "s|@EFFECTIVE_IO_CONCURRENCY@|$EFFECTIVE_IO_CONCURRENCY|g" \
-    -e "s|@DISK_TYPE@|$DISK_TYPE|g" \
+    -e "s|@DISK_TYPE@|$DISK_TYPE_LABEL|g" \
     "$tmpl" > "$out"
   if grep -qE '@[A-Z_]+@' "$out"; then
     echo "ERROR: unsubstituted token(s) in $out:" >&2
@@ -258,6 +265,18 @@ verify() {
 
 if [ "$OPT_VERIFY" = "1" ]; then
   verify || { echo "Verification failed. Generated files were left for inspection." >&2; exit 1; }
+fi
+
+# Advisory: --apps N is only safe while the live database count stays <= N.
+# (skipped silently when the stack is not up yet)
+if command -v docker >/dev/null 2>&1 \
+   && docker compose exec -T postgresql pg_isready -U postgres >/dev/null 2>&1; then
+  LIVE_DBS="$(docker compose exec -T postgresql psql -U postgres -tAc \
+    'SELECT count(*) FROM pg_database WHERE datallowconn AND NOT datistemplate' 2>/dev/null || echo 0)"
+  if [ "${LIVE_DBS:-0}" -gt "$OPT_APPS" ] 2>/dev/null; then
+    echo ">> WARN: $LIVE_DBS databases exist but --apps $OPT_APPS was given —" >&2
+    echo ">>       budgets now sum past max_connections; re-run with --apps $LIVE_DBS" >&2
+  fi
 fi
 
 echo ">> Done. Generated:"

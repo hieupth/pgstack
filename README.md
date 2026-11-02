@@ -92,6 +92,15 @@ postgresql://zitadel:<pw>@10.8.0.1:6432/zitadel?sslmode=verify-full&sslrootcert=
 One-off admin from anywhere: `ssh -L 6432:127.0.0.1:6432 <host>`, then use
 `psql -h localhost` as above.
 
+Defense-in-depth (optional, needs root once): the WG bind itself only answers
+on the tunnel address — peers cannot route to it without valid keys — but you
+can also enforce it at the firewall:
+
+```
+nft add rule inet filter input iifname "wg0" tcp dport 6432 accept
+nft add rule inet filter input tcp dport 6432 drop
+```
+
 ## Tuning (`tunner.sh`)
 
 Detects CPU cores, RAM, and disk type, then writes both config files from templates:
@@ -158,7 +167,10 @@ docker compose exec -T postgresql pg_restore -U postgres -C -d postgres backups/
 ```bash
 ./backup.sh                                                  # fresh backup
 docker compose down
-docker run --rm -v "$PWD/data":/data alpine sh -c 'rm -rf /data/*'
+# Wipe the old cluster. The guard refuses to run from any directory not named
+# pgstack — `rm -rf` on a wrong $PWD must not be possible:
+[ "${PWD##*/}" = "pgstack" ] && docker run --rm -v "$PWD/data":/data alpine sh -c 'rm -rf /data/*' \
+  || echo "REFUSING: run from the pgstack checkout"
 docker compose up -d --wait                                  # fresh cluster; same ./password = same superuser
 zcat backups/globals-<stamp>.sql.gz | docker compose exec -T postgresql psql -U postgres
 # EXPECTED above: exactly one `ERROR: role "postgres" already exists` — the

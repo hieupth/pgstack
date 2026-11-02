@@ -11,7 +11,9 @@
 # Usage:
 #   ./cred.sh pgbouncer_admin        # console user (no database)
 #   ./cred.sh zitadel zitadel        # app user + its database
-# Re-running rotates the password.
+# Re-running rotates the password. Every step is idempotent: an interrupted
+# run is healed simply by running it again (worst case the new password is in
+# postgres but the old verifier still serves pgbouncer until this re-runs).
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -38,7 +40,9 @@ done
 exec 9>"$SCRIPT_DIR/.cred.lock"
 flock 9
 
-psql_root() { docker compose exec -T postgresql psql -U postgres "$@"; }
+# ON_ERROR_STOP: fail at the first failing statement instead of silently
+# continuing (e.g. CREATE ok but ALTER fails) into a half-applied state.
+psql_root() { docker compose exec -T postgresql psql -U postgres -v ON_ERROR_STOP=1 "$@"; }
 
 umask 077   # normalize regardless of caller; pgbouncer runs as your uid
             # (compose user:) so userlist/creds never need group/other access

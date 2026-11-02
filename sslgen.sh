@@ -85,25 +85,43 @@ else
 fi
 
 echo ">> Generating server certificate for '$HOSTNAME_IN' (SAN: $SAN) ..."
-openssl genrsa -out privkey.pem 2048 2>/dev/null
-openssl req -new -key privkey.pem -subj "/CN=${HOSTNAME_IN}" -out server.csr
-cat > server.ext <<EOF
+# Stage everything first; the live ./ssl files are only replaced after the
+# key/cert pair proves consistent — an interrupted run can never leave a
+# mismatched (or half-written) pair behind.
+STAGING="$SSL_DIR/.staging"
+rm -rf "$STAGING"; mkdir "$STAGING"; chmod 700 "$STAGING"
+openssl genrsa -out "$STAGING/privkey.pem" 2048 2>/dev/null
+openssl req -new -key "$STAGING/privkey.pem" -subj "/CN=${HOSTNAME_IN}" -out "$STAGING/server.csr"
+cat > "$STAGING/server.ext" <<EOF
 subjectAltName=$SAN
 basicConstraints=CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth
 EOF
-openssl x509 -req -in server.csr -CA ca.pem -CAkey "$CA_KEY_DIR/ca-key.pem" -CAcreateserial \
-  -out cert.pem -days 825 -sha256 -extfile server.ext
-rm -f server.csr server.ext ca.srl
+openssl x509 -req -in "$STAGING/server.csr" -CA ca.pem -CAkey "$CA_KEY_DIR/ca-key.pem" -CAcreateserial \
+  -out "$STAGING/cert.pem" -days 825 -sha256 -extfile "$STAGING/server.ext"
+
+# Pair + chain verification BEFORE publishing (a bad pair never lands):
+openssl x509 -in "$STAGING/cert.pem" -noout -pubkey > "$STAGING/cert.pub"
+openssl pkey -in "$STAGING/privkey.pem" -pubout > "$STAGING/key.pub" 2>/dev/null
+if ! cmp -s "$STAGING/cert.pub" "$STAGING/key.pub"; then
+  echo "error: generated key/cert pair mismatch — nothing written" >&2
+  rm -rf "$STAGING"; exit 1
+fi
+openssl verify -CAfile ca.pem "$STAGING/cert.pem" || { rm -rf "$STAGING"; exit 1; }
+
+# Publish: renames within ./ssl are atomic per file and container-visible
+# (./ssl is a DIRECTORY mount — it follows paths, not inodes, unlike the
+# single-file mounts where in-place writes are mandatory).
+chmod 600 "$STAGING/privkey.pem"
+chmod 644 "$STAGING/cert.pem"
+mv "$STAGING/privkey.pem" privkey.pem
+mv "$STAGING/cert.pem" cert.pem
+rm -rf "$STAGING" server.csr server.ext ca.srl
 
 # Permissions: pgbouncer runs as YOUR uid in the container (compose `user:`),
 # so the private key never needs to be world-readable.
-chmod 600 privkey.pem
-chmod 644 ca.pem cert.pem
-
-echo ">> Verifying CA signs the server cert ..."
-openssl verify -CAfile ca.pem cert.pem
+chmod 644 ca.pem
 
 echo ">> NOTE: if the stack is running, load the new cert/key:"
 echo "         docker compose restart pgbouncer"
