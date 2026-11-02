@@ -34,7 +34,9 @@ default_pool_size = @DEFAULT_POOL_SIZE@
 min_pool_size = 8
 reserve_pool_size = 12
 max_db_connections = @MAX_DB_CONNECTIONS@
-max_user_connections = 100
+# Per-APP backend budget: tunner.sh sets it to (max_connections - 30) / --apps N
+# so that N app databases cannot together exceed postgres' max_connections.
+max_user_connections = @MAX_USER_CONNECTIONS@
 
 # Behavior settings
 server_round_robin = 1

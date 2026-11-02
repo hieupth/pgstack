@@ -34,6 +34,7 @@ min_wal_size = 256MB
 # LOGGING
 logging_collector = off                            # logs go to stderr -> docker json-file
 log_min_duration_statement = 1000                  # log queries slower than 1s
+log_parameter_max_length = 0                       # never log bind-parameter VALUES (slow-query logs keep $n placeholders)
 log_checkpoints = on
 log_connections = on
 log_disconnections = off

@@ -6,7 +6,10 @@ secrets:
 
 services:
   postgresql:
-    image: postgres:17
+    # Digest-pinned on purpose: a moved tag can never silently change what
+    # runs (this actually happened with postgres:17 -> 17.11 mid-session).
+    # Update deliberately: docker compose pull, then update the digest here.
+    image: postgres:17@sha256:c469d92cbb89e123ba7c2c7c1a8815572943584085c37b007bacb43150a8c9e4
     container_name: postgresql
     restart: unless-stopped
     networks:
@@ -42,16 +45,20 @@ services:
         max-file: "3"
 
   pgbouncer:
-    image: edoburu/pgbouncer:v1.25.2-p0
+    image: edoburu/pgbouncer:v1.26.1-p0@sha256:488422e38cff912895d0d65d8963fcd306e6ac589a724398b6eb8e294e94d624
     container_name: pgbouncer
     restart: unless-stopped
     networks:
       - pgstacknet
+    # Runs as YOUR uid (from .env, written by ./setup.sh): lets pgbouncer read
+    # 0600 files you own (userlist.txt, TLS key) — no world-readable secrets.
+    user: "${PGBOUNCER_UID:?run ./setup.sh first}:${PGBOUNCER_GID:?run ./setup.sh first}"
     ports:
-      # Loopback only by default — nothing exposed off-host. Remote apps come in
-      # via `tailscale serve --bg --tcp=6432 tcp://127.0.0.1:6432` (tailnet-only,
-      # never `funnel`), or an SSH tunnel for one-off admin.
+      # Loopback for local admin/SSH tunnels + the WireGuard address for app
+      # VPSes (WG_BIND from .env). Nothing is exposed on the public internet;
+      # setup.sh binds 127.0.0.2 as a placeholder until WireGuard is up.
       - "127.0.0.1:6432:5432"
+      - "${WG_BIND:?run ./setup.sh first}:6432:5432"
     links:
       - postgresql:postgresql
     depends_on:
@@ -65,7 +72,9 @@ services:
       - ./pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
       - ./ssl:/ssl:ro
     healthcheck:
-      test: ["CMD-SHELL", "nc -z postgresql 5432 || exit 1"]
+      # pgbouncer's OWN listener (in-container), not the postgres backend:
+      # "healthy" must mean pgbouncer is serving, not merely that postgres is up.
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 5432 || exit 1"]
       interval: 10s
       timeout: 10s
       retries: 3

@@ -19,6 +19,14 @@ cd "$SCRIPT_DIR"
 
 [ $# -ge 1 ] && [ $# -le 2 ] || { echo "Usage: $0 <role> [dbname]" >&2; exit 2; }
 ROLE="$1"; DB="${2:-}"
+
+# Same reason as setup.sh: as root, creds/${ROLE}.pw would be root-owned 0600
+# (unreadable to the operator) and userlist.txt ownership would diverge.
+if [ "$(id -u)" = "0" ]; then
+  echo "ERROR: do not run $0 as root — run it as the operator user that owns" >&2
+  echo "       this checkout (creds/*.pw must stay owned by that user)." >&2
+  exit 1
+fi
 for ident in "$ROLE" "$DB"; do
   [ -z "$ident" ] && continue
   [[ "$ident" =~ ^[a-z_][a-z0-9_]{0,62}$ ]] \
@@ -32,7 +40,8 @@ flock 9
 
 psql_root() { docker compose exec -T postgresql psql -U postgres "$@"; }
 
-umask 022   # normalize regardless of caller; creds/*.pw gets explicit 600 below
+umask 077   # normalize regardless of caller; pgbouncer runs as your uid
+            # (compose user:) so userlist/creds never need group/other access
 
 psql_root -tAc 'SELECT 1' >/dev/null 2>&1 \
   || { echo "ERROR: postgresql not reachable — run ./setup.sh or 'docker compose up -d' first" >&2; exit 1; }
@@ -67,7 +76,7 @@ printf '"%s" "%s"\n' "$ROLE" "$VERIFIER" >> userlist.txt.tmp
 # mv would hand it a stale empty file no reload can ever see.
 cat userlist.txt.tmp > userlist.txt
 rm -f userlist.txt.tmp
-chmod 644 userlist.txt   # pgbouncer (container uid) must be able to read it
+chmod 600 userlist.txt   # pgbouncer runs as your uid (compose user:) — 600 is enough
 
 # Restart pgbouncer (NOT just SIGHUP): tested — after a rotation, pgbouncer's
 # in-memory per-user auth state keeps failing NEW server logins until a full

@@ -32,18 +32,21 @@ Options:
   --ram MB      override detected RAM in MB        (e.g. 3840)
   --cpu N       override detected CPU cores        (e.g. 6)
   --disk TYPE   force disk type: ssd | hdd
+  --apps N      number of app databases: sizes the per-app backend budget
+                max_user_connections = (max_connections - 30) / N   (default 1)
   --no-verify   skip the docker postgres boot check
   -h, --help    show this help
 EOF
 }
 
 # ---- arg parsing
-OPT_RAM=""; OPT_CPU=""; OPT_DISK=""; OPT_VERIFY=1
+OPT_RAM=""; OPT_CPU=""; OPT_DISK=""; OPT_VERIFY=1; OPT_APPS=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --ram)        OPT_RAM="$2";  shift 2;;
     --cpu)        OPT_CPU="$2";  shift 2;;
     --disk)       OPT_DISK="$2"; shift 2;;
+    --apps)       OPT_APPS="$2"; shift 2;;
     --no-verify)  OPT_VERIFY=0;  shift;;
     -h|--help)    usage; exit 0;;
     *) echo "unknown arg: $1" >&2; usage >&2; exit 2;;
@@ -105,6 +108,9 @@ fi
 if ! [[ "$RAM" =~ ^[0-9]+$ ]] || [ "$RAM" -lt 256 ]; then
   echo "ERROR: invalid RAM '$RAM' MB (minimum 256)" >&2; exit 1
 fi
+if ! [[ "$OPT_APPS" =~ ^[0-9]+$ ]] || [ "$OPT_APPS" -lt 1 ]; then
+  echo "ERROR: invalid --apps value '$OPT_APPS' (integer >= 1)" >&2; exit 1
+fi
 
 case "$DISK" in
   0) DISK_TYPE="SSD";;
@@ -136,7 +142,16 @@ compute() {
   # PgBouncer: keep the backend pool coherent with postgres max_connections and
   # scale the per-(db,user) pool to cores. These are STARTING POINTS - measure
   # real load and tune (see README "Tuning PgBouncer").
+  # max_db/max_user_connections are PER database/user: with N app databases the
+  # sum of their budgets must still fit under max_connections, hence the per-app
+  # budget below (sum_i B_i <= max_connections - 30 headroom).
   MAX_DB_CONNECTIONS=$(( PG_MAX_CONNECTIONS - 30 ))   # room for admin/maint/autovacuum
+  MAX_USER_CONNECTIONS=$(( MAX_DB_CONNECTIONS / OPT_APPS ))
+  if [ "$MAX_USER_CONNECTIONS" -lt 4 ]; then
+    echo "ERROR: --apps $OPT_APPS leaves only $MAX_USER_CONNECTIONS backend conns per app" >&2
+    echo "       under max_connections=$PG_MAX_CONNECTIONS. Fewer apps, or raise PG_MAX_CONNECTIONS." >&2
+    exit 1
+  fi
   DEFAULT_POOL_SIZE=$(( CPU * 3 ))
   if [ "$DEFAULT_POOL_SIZE" -lt 10 ]; then DEFAULT_POOL_SIZE=10; fi
   if [ "$DEFAULT_POOL_SIZE" -gt 50 ]; then DEFAULT_POOL_SIZE=50; fi
@@ -161,8 +176,8 @@ printf '   -> shared_buffers=%sMB  effective_cache_size=%sMB  work_mem=%sMB  mai
 printf '   -> max_worker_processes=%s  parallel=%s/%s  maintenance_parallel=%s  wal_buffers=%sMB\n' \
   "$MAX_WORKER_PROCESSES" "$MAX_PARALLEL_WORKERS" "$MAX_PARALLEL_WORKERS_PER_GATHER" \
   "$MAX_PARALLEL_MAINTENANCE_WORKERS" "$WAL_BUFFERS"
-printf '   -> max_connections=%s   pgbouncer: max_db_connections=%s  default_pool_size=%s\n' \
-  "$PG_MAX_CONNECTIONS" "$MAX_DB_CONNECTIONS" "$DEFAULT_POOL_SIZE"
+printf '   -> max_connections=%s   pgbouncer: max_db_connections=%s  max_user_connections=%s  default_pool_size=%s\n' \
+  "$PG_MAX_CONNECTIONS" "$MAX_DB_CONNECTIONS" "$MAX_USER_CONNECTIONS" "$DEFAULT_POOL_SIZE"
 printf '   -> random_page_cost=%s  effective_io_concurrency=%s\n' \
   "$RANDOM_PAGE_COST" "$EFFECTIVE_IO_CONCURRENCY"
 
@@ -182,6 +197,7 @@ render() {
     -e "s|@MAX_PARALLEL_MAINTENANCE_WORKERS@|$MAX_PARALLEL_MAINTENANCE_WORKERS|g" \
     -e "s|@MAX_CONNECTIONS@|$PG_MAX_CONNECTIONS|g" \
     -e "s|@MAX_DB_CONNECTIONS@|$MAX_DB_CONNECTIONS|g" \
+    -e "s|@MAX_USER_CONNECTIONS@|$MAX_USER_CONNECTIONS|g" \
     -e "s|@DEFAULT_POOL_SIZE@|$DEFAULT_POOL_SIZE|g" \
     -e "s|@RANDOM_PAGE_COST@|$RANDOM_PAGE_COST|g" \
     -e "s|@EFFECTIVE_IO_CONCURRENCY@|$EFFECTIVE_IO_CONCURRENCY|g" \

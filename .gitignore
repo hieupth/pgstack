@@ -11,5 +11,9 @@ userlist.txt
 creds/
 .cred.lock
 
+# Deployment-specific compose interpolation (uid, WG bind) + CA signing key
+.env
+ssl-ca/
+
 # backup.sh output
 backups/
