@@ -65,9 +65,37 @@ detect_wg_bind() {
 # tr strips CR/trailing whitespace (a Windows-edited .env would otherwise
 # round-trip a poisoned WG_BIND forever).
 EXISTING_BIND="$(sed -n 's/^WG_BIND=//p' .env 2>/dev/null | tr -d '[:space:]' || true)"
+# Tunner flags persist across re-runs: a DR re-apply without flags reuses the
+# saved ones, so --apps/--ram/--cpu/--disk budgets can no longer silently reset
+# to defaults. Passing new flags overwrites the saved set.
+SAVED_TUNNER_ARGS="$(sed -n 's/^TUNNER_ARGS=//p' .env 2>/dev/null | tr -d '\r' || true)"
+if [ "$#" -gt 0 ]; then
+  TUNNER_ARGS="$*"
+else
+  TUNNER_ARGS="${SAVED_TUNNER_ARGS:-}"
+  [ -n "$TUNNER_ARGS" ] && echo ">> reusing saved tunner args: $TUNNER_ARGS (pass new args to override)"
+fi
 if [ -n "$EXISTING_BIND" ] && [ "$EXISTING_BIND" != "127.0.0.2" ]; then
   WG_BIND="$EXISTING_BIND"
-  echo ">> keeping existing WG_BIND=$WG_BIND from .env"
+  # A preserved value is still VALIDATED before it is trusted — otherwise a
+  # typo'd public IP or an address from a dead network layout would silently
+  # PUBLISH pgbouncer on it. Allowed: loopback, our canonical WG_IP (may be
+  # down right now — the compose bind failing until wg0 is up is the known
+  # flow), or anything currently on a wireguard-type interface.
+  case "$WG_BIND" in
+    127.0.0.*|::1) ;;
+    "$WG_IP") ;;
+    *)
+      PDEV="$(ip -br addr show 2>/dev/null | grep -w "$WG_BIND" | awk '{print $1}' | head -1)"
+      if [ -z "$PDEV" ] || ! ip -d link show "$PDEV" 2>/dev/null | grep -qw wireguard; then
+        echo "ERROR: WG_BIND=$WG_BIND (.env) is neither loopback, nor $WG_IP, nor an address" >&2
+        echo "       on a wireguard interface — refusing to publish pgbouncer on it." >&2
+        echo "       Fix .env (expected $WG_IP once wg0 is up) and re-run." >&2
+        exit 1
+      fi
+      ;;
+  esac
+  echo ">> keeping existing WG_BIND=$WG_BIND from .env (validated)"
 else
   WG_BIND="$(detect_wg_bind)"
   if [ "$WG_BIND" = "127.0.0.2" ]; then
@@ -80,6 +108,7 @@ cat > .env <<EOF
 PGBOUNCER_UID=$(id -u)
 PGBOUNCER_GID=$(id -g)
 WG_BIND=$WG_BIND
+TUNNER_ARGS=$TUNNER_ARGS
 EOF
 
 # ---- 1. superuser password -------------------------------------------------
@@ -150,18 +179,50 @@ fi
 if [ ! -f ssl/ca.pem ]; then
   ./sslgen.sh "$HOSTNAME_IN" "$WG_IP" 127.0.0.1 localhost
 else
-  echo ">> ssl/ exists — skipping sslgen"
-  echo ">>       (add SANs later: ./sslgen.sh <host> $WG_IP 127.0.0.1 localhost --force)"
+  # An upgraded deployment may carry a broken PKI state (cert/key pair left
+  # mismatched by an interrupted reissue, cert no longer chaining, drifted
+  # file modes). Verify BEFORE trusting it; heal by reissuing.
+  if [ -f ssl/cert.pem ] && [ -f ssl/privkey.pem ]; then
+    if ! { openssl x509 -in ssl/cert.pem -noout -pubkey 2>/dev/null \
+             | cmp -s - <(openssl pkey -in ssl/privkey.pem -pubout 2>/dev/null); } \
+       || ! openssl verify -CAfile ssl/ca.pem ssl/cert.pem >/dev/null 2>&1; then
+      echo "ERROR: ssl/ holds an inconsistent set (cert/key mismatch or broken chain)." >&2
+      echo "       Heal: ./sslgen.sh '$HOSTNAME_IN' $WG_IP 127.0.0.1 localhost --force" >&2
+      echo "             then: docker compose restart pgbouncer" >&2
+      exit 1
+    fi
+    chmod 600 ssl/privkey.pem; chmod 644 ssl/cert.pem ssl/ca.pem
+    chmod 700 ssl ssl-ca 2>/dev/null || true
+    echo ">> ssl/ verified: key matches cert, cert chains to CA; permissions normalized"
+  else
+    echo ">> WARN: ssl/ca.pem exists without cert/key — run sslgen.sh --force to issue them" >&2
+  fi
 fi
 
 # ---- 4. tuned configs --------------------------------------------------------
-./tunner.sh "$@"
+./tunner.sh $TUNNER_ARGS   # intentional word-split: simple --flag value tokens
 
 # ---- 5. stack up ---------------------------------------------------------------
 # pgstacknet is declared `external: true` in compose.yml (keeps it survive
 # `docker compose down`); create it if this is a fresh host.
 docker network create pgstacknet 2>/dev/null || true
 docker compose up -d --wait
+
+# Second chance at locking ./password WITHOUT host root: the file is a bind
+# mount, so the inode is shared — root INSIDE the postgres container can set
+# its ownership for us. (postgres only reads it at initdb, which has just run
+# on a fresh install; locking afterwards costs nothing.)
+if [ "$(stat -c %u password)" = "$(id -u)" ]; then
+  # NB: NOT via the stack's own container — compose mounts secrets read-only
+  # (chown through it hits EROFS). A throwaway rw bind mount of the shared
+  # inode works without host root (verified live).
+  if docker run --rm -v "$SCRIPT_DIR/password:/pw:rw" alpine:3 \
+      sh -c 'chown 999:999 /pw && chmod 600 /pw' 2>/dev/null; then
+    echo ">> ./password locked to 0600 uid 999 (via throwaway container — no host sudo needed)"
+  else
+    echo ">> WARN: ./password still 0644 (neither sudo nor the container lock worked)" >&2
+  fi
+fi
 
 # Harden: no role may CONNECT to the admin databases (superuser/owner exempt).
 # App databases get the same treatment in ./cred.sh; without this, any app

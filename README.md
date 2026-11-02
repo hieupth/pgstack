@@ -186,6 +186,8 @@ docker compose exec -T postgresql pg_restore -U postgres -C -d postgres backups/
 
 ```bash
 ./backup.sh                                                  # fresh backup
+# STOP — before wiping anything, prove the fresh dumps are readable:
+pg_restore -l backups/zitadel-<stamp>.dump >/dev/null && echo "dump OK"   # per dump
 docker compose down
 # Wipe the old cluster. The guard refuses to run from any directory not named
 # pgstack — `rm -rf` on a wrong $PWD must not be possible:

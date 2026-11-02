@@ -59,11 +59,18 @@ else
   echo "ERROR: globals dump FAILED" >&2
 fi
 
-# 3) per-db — process substitution (not a pipe) so FAILED propagates;
+# 3) per-db — the listing is CAPTURED with an explicit failure check first:
+#    a process substitution that dies produced an empty list, zero loop
+#    iterations and exit 0 — "successful backup" with no databases dumped.
 #    while/read (not for+word-split) so db names with spaces survive.
-#    NB: every exec inside the loop gets </dev/null — `compose exec -T`
-#    otherwise drains THIS loop's stdin and eats the remaining db names
-#    (verified live: zitadel silently vanished from a backup run).
+#    NB: the pg_dump exec keeps </dev/null — `compose exec -T` otherwise
+#    drains THIS loop's stdin and eats the remaining db names (verified
+#    live: zitadel silently vanished from a backup run).
+DB_LIST="$(docker compose exec -T postgresql psql -U postgres -tAc \
+  "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate" < /dev/null)" \
+  || { echo "ERROR: could not list databases — aborting (nothing would be dumped)" >&2; exit 1; }
+[ -n "$DB_LIST" ] || { echo "ERROR: database listing came back EMPTY — aborting instead of faking success" >&2; exit 1; }
+
 while IFS= read -r db; do
   [ -n "$db" ] || continue
   echo ">> $db -> $db-$STAMP.dump"
@@ -74,8 +81,7 @@ while IFS= read -r db; do
     FAILED="$FAILED $db"
     echo "ERROR: dump of '$db' FAILED (continuing with the other databases)" >&2
   fi
-done < <(docker compose exec -T postgresql psql -U postgres -tAc \
-  "SELECT datname FROM pg_database WHERE datallowconn AND NOT datistemplate" < /dev/null)
+done <<< "$DB_LIST"
 
 echo ">> done: $(find "$OUT" -maxdepth 1 -type f -name "*-$STAMP.*" | wc -l) files with stamp $STAMP in $OUT"
 if [ -n "$FAILED" ]; then
